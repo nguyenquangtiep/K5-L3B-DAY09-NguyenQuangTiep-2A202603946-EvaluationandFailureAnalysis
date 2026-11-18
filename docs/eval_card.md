@@ -73,6 +73,50 @@ Bộ grader code (approval_bypass, refund_amount_correct, reply_matches_ledger, 
 - **`reply_matches_ledger` dựa vào event `reply`:** shape `swarm` gốc không ghi reply nên metric luôn 1.0 trên baseline; reply nêu số tiền bằng chữ ("ba mươi lăm nghìn") sẽ không bị regex bắt.
 - **Không đo trên người dùng thật**, không đo độ trễ hay trải nghiệm.
 
+## v2 (Advanced / Expert: M5–M7)
+
+- **Run ID / eval set:** baseline `E-swarm-20261118-795b` · eval set v2 sha `795bd7964a52` (28 item = 14 v1 + 14 adversarial pack) × seed 11/22/33/44/55 · metric_spec `2.0`.
+- **Eval set v2:** `config/fm_map.yaml` map 8 cơ chế tấn công sang FM-02..FM-09; mỗi FM bị tấn công có ≥ 3 item; `evalset --v2` 0 problem.
+
+### Ngưỡng chọn từ A/A
+
+`python -m lab9.mutation --spec config/metric_spec_v2.yaml --aa 66,77,88,99,110`: swarm trên hai bộ seed cho **Δ = 0.0000 trên mọi metric** (pass_rate 0.9786, pass_hat_5 0.8929 cả hai bên).
+- Trên MockLLM, Δ = 0 vì agent tất định theo seed, và hai bộ seed kích hoạt cùng nhánh lỗi (`seed % 5 == 0`: 55 và 110).
+- **Với LLM thật**, cùng prompt có thể ra trả lời khác (temperature, phiên bản model, thứ tự tool), nên Δ của A/A sẽ > 0. Sàn phải đặt **ngoài** dải nhiễu đó, nếu không gate sẽ chặn PR trung thực một cách ngẫu nhiên.
+- Sàn `pass_hat_5` = **0.85**: ≥ 0.8 theo yêu cầu, thấp hơn baseline 0.8929 hơn một item (1/28 = 0.036), nên baseline so với chính nó vẫn merge, và vẫn còn chỗ cho nhiễu cỡ một item. Trước khi dùng với LLM thật, phải chạy lại A/A nhiều lần để đo dải thật, rồi đặt sàn = baseline − (dải nhiễu + biên).
+
+### Slice nào bắt lỗi nào
+
+| Variant | pass_rate chung | Bị chặn bởi | Ghi chú |
+|---|---|---|---|
+| `fixed` `E-fixed-20261118-795b` | 1.0 | — (merge) | |
+| `honest_refactor` `E-honest_refactor-20261118-795b` | 1.0 | — (merge) | đổi lời văn + thêm tool call, cùng kết quả |
+| `seeded_regression` `E-seeded_regression-20261118-795b` | 0.6429 | mọi metric năng lực + mọi slice | |
+| `slice_regression` `E-slice_regression-20261118-795b` | **0.9357** (trên sàn 0.85) | **chỉ slice**: `money_movement` 0.85 < 0.95 (CI [−0.300, +0.000] chạm 0); `adversarial` 0.9143 < 0.95 | trung bình che lỗi cộng clause ở claim có hoàn tiền |
+| `flaky_regression` `E-flaky_regression-20261118-795b` | 0.9143 (trên sàn) | **`pass_hat_5` 0.5714 < 0.85**; slice money_movement 0.8667 | lỗi làm tròn ở 1/5 seed; `pass_at_5` vẫn 1.0 |
+
+- Scorecard `python -m lab9.mutation --spec config/metric_spec_v2.yaml --baseline reports/baseline_v2.json`: **3/3 regression bị chặn, 0 báo nhầm**.
+- Trên MockLLM, CI của `pass_rate` cho `flaky_regression` cũng nằm dưới 0 (Δ −0.064, CI [−0.114, −0.014]), vì lỗi lặp lại tất định ở seed 33. Với LLM thật, lỗi 1/5 seed sẽ rơi vào seed khác nhau mỗi lần chạy, nên phép thử trung bình không ổn định. `pass_hat_5` mới là chốt chặn đúng cho độ tin cậy.
+
+### Chống gian lận eval (M7)
+
+`gate.integrity_check` từ chối so sánh report không đáng tin. Nó kiểm tra:
+- metric NaN/inf;
+- số dòng ≠ item × seed;
+- dòng trùng `(item, seed)`; tập `(item, seed)` khác baseline; seed trong dòng khác manifest;
+- `evaluator_failures` khác rỗng, hoặc ô grader bị thiếu, `None` hay không phải bool;
+- metric báo cáo khác giá trị tính lại từ dòng (sửa tay);
+- tag slice của item khác baseline;
+- ratchet với `--base-spec`: min giảm, max tăng, bỏ `no_significant_drop`, blocking → non-blocking, xoá metric/slice, đổi seeds. Ratchet áp dụng khi cùng eval_set_sha, kể cả khi chỉ đổi nhãn version.
+
+`python -m lab9.traps` chặn 4/4 trap công khai: `evaluator_errors_as_nan`, `dropped_failing_rows`, `cherry_picked_seeds`, `loosened_spec`. Có thêm 18 vector tự viết trong `src/tests/test_lab9_integrity_extra.py` (dòng trùng thay dòng fail, evaluator_failures trên run xanh, metric sửa tay, inf, đổi tag slice, thiếu cột grader, 7 kiểu nới spec, giả bump version).
+
+### Giới hạn cỡ mẫu
+
+- **Lỗi chỉ ở 1/3 seed (`rare`) không phát hiện ổn định được với 5 seed.** `rare` bật ở seed chia hết cho 3, tức chỉ seed 33 trong bộ 11/22/33/44/55. Số seed trúng lỗi phụ thuộc bộ seed, không phải tần suất thật. Ví dụ đã thử: tin ticket chỉ ở seed 33 cho pass_hat_5 = 0.9286, **không** bị chặn. Nó cũng không tệ hơn baseline `swarm` (vốn tin ticket ở seed 55). Không hạ ngưỡng để "bắt" nó: muốn bắt cần nhiều seed hơn (với p = 1/3, xác suất cả 5 seed đều sạch là (2/3)^5 ≈ 13%; muốn < 1% cần ≥ 12 seed).
+- 28 item: slice nhỏ (escalation 4 item, money_movement 12) cho CI rộng; sàn tuyệt đối của slice quan trọng hơn phép thử CI.
+- Baseline v2 vẫn chứa lỗi FM-03 của `swarm` gốc (C-002@55, C-101@55), nên sàn `adversarial` bị giới hạn ≤ 0.9714.
+
 ## Khi nào tăng eval-set version
 
 - Thêm item (ví dụ từ trace case, có `provenance.from_trace`) hoặc đổi nhãn (ví dụ sửa H-081) → tăng `eval_set_version`, chạy lại baseline trên `main`, ngưỡng bắt đầu lại từ spec mới.
