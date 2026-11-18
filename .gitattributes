@@ -1,0 +1,5 @@
+# Eval data and reports are hashed (eval_set_sha) and compared with CI on Linux:
+# keep LF in the working copy on every OS so local and CI hashes agree.
+*.jsonl text eol=lf
+*.json  text eol=lf
+*.yaml  text eol=lf
